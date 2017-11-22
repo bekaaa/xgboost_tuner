@@ -2,7 +2,7 @@
 import numpy as np
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score
-import log
+from logger import logger
 
 
 class xgb_tuner :
@@ -17,12 +17,20 @@ class xgb_tuner :
 		self.__esrounds = esrounds
 		self.__nfolds = nfolds
 		self.__seed = seed
-		self.params = params
+		self.__params = params
+		self.__logger = None
+		self.__cvfolds = None
 		np.random.seed(self.__seed)
-		#-----------------
-		self.cvfolds = None
 		#--------------------
 		if self.__logging : self.__init_log(log_file_index)
+	#*****************************************************************************
+	def set_param(self,param,value):
+		assert param in self.__params.keys()
+		self.__params[param] = value
+		return
+	#******************************************************************************
+	def get_param(self):
+		return self.__params
 	#*****************************************************************************
 	def __call__(self, param_names, param_grid, all_results=[]) :
 		'''
@@ -35,19 +43,19 @@ class xgb_tuner :
 		assert type(param_names) == list
 		assert type(param_grid) == list
 		assert len(param_names) == len(param_grid[0])
-		for p in param_names : assert p in self.params.keys()
+		for p in param_names : assert p in self.__params.keys()
 		#---------------------------------------
 		# ------- emptying some variables ----------------
 		best_results = {}
 		best_results['dev_sc'] = -1
 		#----------------------------------------
-		if self.__logging : log.msg('**** Starting grid-call search *********')
+		if self.__logging : self.__logger.add('**** Starting grid-call search *********')
 		for grid in param_grid :
 			#------ set starter log message -----------------
 			msg = "CV with "
 			for i,v in enumerate(grid):
 				msg+= "%s = %g, " % (param_names[i], v)
-			if self.__logging : log.msg(msg)
+			if self.__logging : self.__logger.add(msg)
 			#------------------------------------------------------------
 			#-------- call step_cv function on each grid -----------------
 			results = None
@@ -76,7 +84,7 @@ class xgb_tuner :
 					  results['f_dev_sc'],
 					  results['rounds'],
 					  results['step_time'])
-			if self.__logging : log.msg(msg)
+			if self.__logging : self.__logger.add(msg)
 			else : print msg
 			# -------------------------------------------------------
 			# ---- checking for best score and assigning some other bests ;) ---------
@@ -86,7 +94,7 @@ class xgb_tuner :
 			#-------------------------------------------------------------------------
 
 		#-------- last log message for grid-call search ----------------------
-		if self.__logging : log.msg('****** End of grid-call search *********')
+		if self.__logging : self.__logger.add('****** End of grid-call search *********')
 		msg =   'best dev score : %g, '\
 				'best fold-train score : %g, '\
 				'best fold-dev score : %g, '\
@@ -99,7 +107,7 @@ class xgb_tuner :
 		for i,v in enumerate(best_results['grid']) :
 			msg += 'best %s = %g, ' % (param_names[i], v)
 		msg += '\n-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*\n'
-		if self.__logging : log.msg(msg)
+		if self.__logging : self.__logger.add(msg)
 		print msg
 		#---------------------------------------------------------------------------
 		return best_results, all_results
@@ -113,11 +121,11 @@ class xgb_tuner :
 		 '''
 		# update the params dict with the new grid.
 		for p,v in zip(param_names, grid) :
-			self.params[p] = v
+			self.__params[p] = v
 
 		t = np.datetime64('now')
 
-		cv_results = xgb.cv(self.params, self.__dtrain,
+		cv_results = xgb.cv(self.__params, self.__dtrain,
 						num_boost_round=self.__rounds,
 						early_stopping_rounds=self.__esrounds,
 						seed=self.__seed,
@@ -130,11 +138,11 @@ class xgb_tuner :
 						)
 		#-----------------------
 		# predict dev-set and get it's gini score
-		assert self.cvfolds != None
+		assert self.__cvfolds != None
 		dev_preds = np.zeros(self.__dvalid.num_row())
-		for fold in self.cvfolds :
+		for fold in self.__cvfolds :
 			dev_preds += fold.bst.predict(self.__dvalid)
-		dev_preds /= len(self.cvfolds)
+		dev_preds /= len(self.__cvfolds)
 		dev_score = self.gini(self.__dvalid.get_label(), dev_preds)
 		#--------------------------------------
 		results = {
@@ -151,24 +159,21 @@ class xgb_tuner :
 		return roc_auc_score(labels, preds) * 2. - 1
 	#**********************************************************************************
 	def predict(self, dtest) :
-		_ = self.__step_cv(['eta'], [self.params['eta']])
-		assert self.cvfolds != None
+		_ = self.__step_cv(['eta'], [self.__params['eta']])
+		assert self.__cvfolds != None
 		preds = np.zeros(dtest.num_row())
-		for fold in self.cvfolds :
+		for fold in self.__cvfolds :
 			preds += fold.bst.predict(dtest)
-		preds /= len(self.cvfolds)
+		preds /= len(self.__cvfolds)
 		return preds
 	#**********************************************************************************
 	def __init_log(self, index) :
 		assert index >= 0
 		if index == 0 : index = "test"
-		log.LOG_PATH = './logs/'
-		try :
-			_ = log.close()
-		except :
-			pass
-		log.init('tuning_params-' + str(index) + '.log')
-		log.msg('------------------initialized-----------------')
+		logdir = './logs/'
+		logfilename = 'tuning_params-' + str(index) + '.log'
+		self.__logger = logger(logfilename, logdir)
+		self.__logger.add('------------------initialized-----------------')
 	#************************************************************************************
 	def __fpreproc(self, dtrain_, dtest_, param_):
 		''' passes to xgb.cv as a preprocessing function '''
@@ -182,14 +187,14 @@ class xgb_tuner :
 		state = {}
 		def init(env) :
 			state['best_score'] = -1
-			self.cvfolds = None
+			self.__cvfolds = None
 		def callback(env) :
 			if env.iteration == env.begin_iteration :
 				init(env)
 			current_score = env.evaluation_result_list[1][1]
 			if current_score > state['best_score'] :
 				state['best_score'] = current_score
-				self.cvfolds = env.cvfolds
+				self.__cvfolds = env.cvfolds
 		callback.before_iteration = False
 		return callback
 	#****************************************************************************************
